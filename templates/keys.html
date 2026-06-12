@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}密钥管理 - OpenVPN Admin{% endblock %}
+{% block content %}
+<h2>🔑 密钥管理</h2>
+
+{% if role in ('admin', 'operator') %}
+<div class="panel">
+  <h3>申请新密钥</h3>
+  <form method="POST" action="/keys/create" class="inline-form">
+    <input type="text" name="common_name" placeholder="客户端名称 (如: zhangsan-laptop)"
+           required pattern="[a-zA-Z0-9_\-\.]+" style="min-width:260px">
+    <input type="text" name="description" placeholder="备注说明 (可选)">
+    <button type="submit" class="btn btn-primary">生成密钥</button>
+  </form>
+  <p class="text-muted" style="margin-top:8px">客户端名称只能包含字母、数字、下划线、连字符和点</p>
+</div>
+{% endif %}
+
+<div class="panel">
+  <h3>密钥列表</h3>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>客户端名称</th><th>状态</th><th>签发者</th><th>签发时间</th>
+        <th>吊销时间</th><th>备注</th><th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in records %}
+    <tr>
+      <td><strong>{{ r.common_name }}</strong></td>
+      <td>
+        <span class="badge {{ 'badge-success' if r.status == 'active' else 'badge-danger' }}">
+          {{ {'active':'活跃','revoked':'已吊销','expired':'已过期'}.get(r.status, r.status) }}
+        </span>
+      </td>
+      <td>{{ r.issued_by }}</td>
+      <td>{{ r.issued_at }}</td>
+      <td>{{ r.revoked_at or '-' }}</td>
+      <td>{{ r.description or '-' }}</td>
+      <td class="actions">
+        {% if r.status == 'active' %}
+        <a href="/keys/{{ r.common_name }}/download" class="btn btn-sm btn-success">📥 下载</a>
+        {% if role in ('admin', 'operator') %}
+        <form method="POST" action="/keys/{{ r.common_name }}/revoke" style="display:inline"
+              onsubmit="return confirm('确定吊销 {{ r.common_name }} 的密钥吗？吊销后客户端将无法连接。')">
+          <button class="btn btn-sm btn-danger">🚫 吊销</button>
+        </form>
+        {% endif %}
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    {% if not records %}
+    <tr><td colspan="7" class="text-center text-muted">暂无密钥记录</td></tr>
+    {% endif %}
+    </tbody>
+  </table>
+</div>
+
+{% if live_certs %}
+<div class="panel">
+  <h3>服务器证书状态 (EasyRSA PKI)</h3>
+  <table class="table">
+    <thead><tr><th>Common Name</th><th>状态</th><th>过期时间</th><th>序列号</th></tr></thead>
+    <tbody>
+    {% for c in live_certs %}
+    <tr>
+      <td>{{ c.common_name }}</td>
+      <td><span class="badge {{ 'badge-success' if c.status == 'valid' else ('badge-danger' if c.status == 'revoked' else 'badge-warning') }}">{{ c.status }}</span></td>
+      <td>{{ c.expiry }}</td>
+      <td><code>{{ c.serial }}</code></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

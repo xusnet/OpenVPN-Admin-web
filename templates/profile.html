@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}个人设置 - OpenVPN Admin{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>👤 个人设置</h1>
+</div>
+
+<div class="card" style="max-width: 500px;">
+  <div class="card-header">
+    <strong>修改密码</strong>
+  </div>
+  <div class="card-body">
+    <form method="POST">
+      <div class="form-group">
+        <label for="current_password">当前密码</label>
+        <input type="password" id="current_password" name="current_password" class="input" required autocomplete="current-password">
+      </div>
+      <div class="form-group">
+        <label for="new_password">新密码</label>
+        <input type="password" id="new_password" name="new_password" class="input" required minlength="6" autocomplete="new-password">
+        <small>至少 6 位字符</small>
+      </div>
+      <div class="form-group">
+        <label for="confirm_password">确认新密码</label>
+        <input type="password" id="confirm_password" name="confirm_password" class="input" required minlength="6" autocomplete="new-password">
+      </div>
+      <button type="submit" class="btn btn-primary">💾 修改密码</button>
+    </form>
+  </div>
+</div>
+
+<div class="card" style="max-width: 500px; margin-top: 1rem;">
+  <div class="card-header">
+    <strong>账户信息</strong>
+  </div>
+  <div class="card-body">
+    <table class="info-table">
+      <tr><td class="label">用户名</td><td>{{ username }}</td></tr>
+      <tr><td class="label">角色</td><td><span class="role-badge role-{{ role }}">{{ role }}</span></td></tr>
+    </table>
+  </div>
+</div>
+{% endblock %}

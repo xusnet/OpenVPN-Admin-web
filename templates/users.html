@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}用户管理 - OpenVPN Admin{% endblock %}
+{% block content %}
+<h2>👥 用户管理</h2>
+
+<div class="panel">
+  <h3>创建用户</h3>
+  <form method="POST" action="/users/create" class="inline-form">
+    <input type="text" name="username" placeholder="用户名" required>
+    <input type="password" name="password" placeholder="密码 (至少6位)" required minlength="6">
+    <select name="role">
+      <option value="viewer">Viewer (只读)</option>
+      <option value="operator">Operator (操作员)</option>
+      <option value="admin">Admin (管理员)</option>
+    </select>
+    <input type="email" name="email" placeholder="邮箱 (可选)">
+    <button type="submit" class="btn btn-primary">创建</button>
+  </form>
+</div>
+
+<div class="panel">
+  <h3>用户列表 ({{ users|length }})</h3>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>ID</th><th>用户名</th><th>角色</th><th>邮箱</th>
+        <th>状态</th><th>创建时间</th><th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for u in users %}
+    <tr>
+      <td>{{ u.id }}</td>
+      <td>{{ u.username }}</td>
+      <td><span class="badge badge-{{ 'danger' if u.role == 'admin' else ('warning' if u.role == 'operator' else 'info') }}">{{ u.role }}</span></td>
+      <td>{{ u.email or '-' }}</td>
+      <td><span class="badge {{ 'badge-success' if u.is_active else 'badge-danger' }}">{{ '启用' if u.is_active else '禁用' }}</span></td>
+      <td>{{ u.created_at }}</td>
+      <td class="actions">
+        {% if u.username != username %}
+        <form method="POST" action="/users/{{ u.id }}/toggle" style="display:inline">
+          <button class="btn btn-sm {{ 'btn-warning' if u.is_active else 'btn-success' }}">
+            {{ '禁用' if u.is_active else '启用' }}
+          </button>
+        </form>
+        <button class="btn btn-sm btn-info" onclick="resetPassword({{ u.id }}, '{{ u.username }}')">重置密码</button>
+        <form method="POST" action="/users/{{ u.id }}/delete" style="display:inline"
+              onsubmit="return confirm('确定删除用户 {{ u.username }} 吗？此操作不可撤销。')">
+          <button class="btn btn-sm btn-danger">删除</button>
+        </form>
+        {% else %}
+        <span class="text-muted">当前用户</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<!-- Reset Password Modal -->
+<div id="resetPwModal" class="modal" style="display:none">
+  <div class="modal-content">
+    <h3>重置密码 - <span id="resetPwUser"></span></h3>
+    <form id="resetPwForm" method="POST">
+      <div class="form-group">
+        <label>新密码</label>
+        <input type="password" name="new_password" required minlength="6" placeholder="至少6位">
+      </div>
+      <div class="modal-actions">
+        <button type="submit" class="btn btn-primary">确认重置</button>
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">取消</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+function resetPassword(id, name) {
+  document.getElementById('resetPwUser').textContent = name;
+  document.getElementById('resetPwForm').action = '/users/' + id + '/reset-password';
+  document.getElementById('resetPwModal').style.display = 'flex';
+}
+function closeModal() {
+  document.getElementById('resetPwModal').style.display = 'none';
+}
+</script>
+{% endblock %}

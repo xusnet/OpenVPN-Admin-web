@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}错误 - OpenVPN Admin{% endblock %}
+{% block content %}
+<div class="error-page">
+  <div class="error-code">{{ code }}</div>
+  <h2 class="error-message">{{ message }}</h2>
+  <p class="error-hint">
+    {% if code == 404 %}
+      你访问的页面不存在或已被移除。
+    {% elif code == 500 %}
+      服务器遇到内部错误，请稍后重试。
+    {% else %}
+      请求处理出现错误。
+    {% endif %}
+  </p>
+  <div class="error-actions">
+    <a href="/" class="btn btn-primary">🏠 返回首页</a>
+    <button onclick="history.back()" class="btn btn-outline">← 返回上页</button>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}审计日志 - OpenVPN Admin{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>📋 审计日志</h1>
+  <span class="badge">共 {{ total }} 条</span>
+</div>
+
+<div class="filter-bar">
+  <form method="GET" class="filter-form">
+    <input type="text" name="user" placeholder="按用户筛选…" value="{{ user_filter }}" class="input-sm">
+    <select name="action" class="input-sm">
+      <option value="">所有操作</option>
+      {% for a in actions %}
+      <option value="{{ a.action }}" {% if action_filter == a.action %}selected{% endif %}>{{ a.action }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit" class="btn btn-sm btn-primary">🔍 筛选</button>
+    {% if action_filter or user_filter %}
+    <a href="/logs" class="btn btn-sm btn-outline">✕ 清除</a>
+    {% endif %}
+  </form>
+</div>
+
+<table class="table">
+<thead>
+  <tr>
+    <th>时间</th>
+    <th>用户</th>
+    <th>操作</th>
+    <th>详情</th>
+    <th>IP</th>
+  </tr>
+</thead>
+<tbody>
+  {% for log in logs %}
+  <tr>
+    <td class="nowrap">{{ log.created_at }}</td>
+    <td>{{ log.username }}</td>
+    <td><span class="action-tag action-{{ log.action.split('_')[0] }}">{{ log.action }}</span></td>
+    <td class="detail-cell">{{ log.detail }}</td>
+    <td class="nowrap mono">{{ log.ip_address }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5" class="empty">暂无日志记录</td></tr>
+  {% endfor %}
+</tbody>
+</table>
+
+{% if total_pages > 1 %}
+<div class="pagination">
+  {% if page > 1 %}
+  <a href="?page={{ page - 1 }}&action={{ action_filter }}&user={{ user_filter }}" class="btn btn-sm btn-outline">◀ 上一页</a>
+  {% endif %}
+  <span class="pagination-info">第 {{ page }} / {{ total_pages }} 页</span>
+  {% if page < total_pages %}
+  <a href="?page={{ page + 1 }}&action={{ action_filter }}&user={{ user_filter }}" class="btn btn-sm btn-outline">下一页 ▶</a>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

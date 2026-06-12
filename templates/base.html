@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}OpenVPN Admin{% endblock %}</title>
+<link rel="stylesheet" href="/static/style.css">
+{% block head %}{% endblock %}
+</head>
+<body>
+{% if username %}
+<nav class="navbar">
+  <div class="nav-brand">🔐 OpenVPN Admin</div>
+  <div class="nav-links">
+    <a href="/" class="nav-item">📊 仪表盘</a>
+    {% if role == 'admin' %}
+    <a href="/users" class="nav-item">👥 用户管理</a>
+    {% endif %}
+    <a href="/keys" class="nav-item">🔑 密钥管理</a>
+    <a href="/service" class="nav-item">⚙️ 服务管理</a>
+    {% if role == 'admin' %}
+    <a href="/config" class="nav-item">📝 配置编辑</a>
+    {% endif %}
+    <a href="/logs" class="nav-item">📋 审计日志</a>
+    <a href="/logs/openvpn" class="nav-item">📜 服务日志</a>
+  </div>
+  <div class="nav-user">
+    <span class="role-badge role-{{ role }}">{{ role }}</span>
+    <span>{{ username }}</span>
+    <a href="/profile" class="nav-item">👤</a>
+    <a href="/logout" class="nav-item">🚪</a>
+  </div>
+</nav>
+{% endif %}
+
+<main class="container">
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% if messages %}
+  <div class="flash-container">
+    {% for category, message in messages %}
+    <div class="flash flash-{{ category }}">{{ message }}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+{% endwith %}
+
+{% block content %}{% endblock %}
+</main>
+
+<script src="/static/app.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

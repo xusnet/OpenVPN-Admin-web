@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}配置历史 - OpenVPN Admin{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>📜 配置历史</h1>
+  <a href="/config" class="btn btn-sm btn-outline">← 返回编辑器</a>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <strong>修改时间:</strong> {{ entry.changed_at }}
+    <span class="badge ml">{{ entry.changed_by }}</span>
+  </div>
+  <div class="card-body">
+    {% if entry.comment %}
+    <div class="comment-box">
+      <strong>备注:</strong> {{ entry.comment }}
+    </div>
+    {% endif %}
+    <pre class="config-viewer">{{ entry.content }}</pre>
+  </div>
+</div>
+{% endblock %}

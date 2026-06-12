@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}仪表盘 - OpenVPN Admin{% endblock %}
+{% block content %}
+<h2>📊 仪表盘</h2>
+
+<div class="stats-grid">
+  <div class="stat-card">
+    <div class="stat-value">{{ user_count }}</div>
+    <div class="stat-label">用户总数</div>
+  </div>
+  <div class="stat-card stat-green">
+    <div class="stat-value">{{ active_keys }}</div>
+    <div class="stat-label">活跃密钥</div>
+  </div>
+  <div class="stat-card stat-red">
+    <div class="stat-value">{{ revoked_keys }}</div>
+    <div class="stat-label">已吊销密钥</div>
+  </div>
+  <div class="stat-card {{ 'stat-green' if ovpn_status and ovpn_status.active else 'stat-red' }}">
+    <div class="stat-value">{{ '运行中' if ovpn_status and ovpn_status.active else '已停止' }}</div>
+    <div class="stat-label">服务状态</div>
+  </div>
+</div>
+
+<div class="panel">
+  <h3>🖥️ OpenVPN 服务状态</h3>
+  {% if ovpn_error %}
+    <div class="flash flash-danger">⚠️ 无法连接 OpenVPN 服务器: {{ ovpn_error }}</div>
+  {% elif ovpn_status %}
+    <div class="info-grid">
+      <div><strong>主机:</strong> {{ ovpn_status.host }}</div>
+      <div><strong>服务:</strong> {{ ovpn_status.service }}</div>
+      <div><strong>状态:</strong>
+        <span class="badge {{ 'badge-success' if ovpn_status.active else 'badge-danger' }}">
+          {{ 'Active' if ovpn_status.active else 'Inactive' }}
+        </span>
+      </div>
+      <div><strong>连接客户端:</strong> {{ ovpn_status.connected_clients }}</div>
+    </div>
+    {% if ovpn_status.clients %}
+    <table class="table">
+      <thead><tr><th>客户端</th><th>IP 地址</th><th>已接收</th><th>已发送</th><th>连接时间</th></tr></thead>
+      <tbody>
+      {% for c in ovpn_status.clients %}
+      <tr>
+        <td>{{ c.common_name }}</td>
+        <td>{{ c.real_address }}</td>
+        <td>{{ c.bytes_received }}</td>
+        <td>{{ c.bytes_sent }}</td>
+        <td>{{ c.connected_since }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    <pre class="code-block">{{ ovpn_status.uptime }}</pre>
+  {% endif %}
+</div>
+
+<div class="panel">
+  <h3>📋 最近操作</h3>
+  <table class="table">
+    <thead><tr><th>时间</th><th>用户</th><th>操作</th><th>详情</th><th>IP</th></tr></thead>
+    <tbody>
+    {% for entry in recent_audit %}
+    <tr>
+      <td>{{ entry.created_at }}</td>
+      <td>{{ entry.username }}</td>
+      <td><span class="badge badge-info">{{ entry.action }}</span></td>
+      <td>{{ entry.detail }}</td>
+      <td>{{ entry.ip_address }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

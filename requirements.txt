@@ -1,0 +1,4 @@
+flask>=3.0
+bcrypt>=4.1
+paramiko>=3.4
+gunicorn>=22.0

@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}服务管理 - OpenVPN Admin{% endblock %}
+{% block content %}
+<h2>⚙️ 服务管理</h2>
+
+{% if error %}
+<div class="flash flash-danger">⚠️ 无法连接 OpenVPN 服务器: {{ error }}</div>
+{% endif %}
+
+{% if status %}
+<div class="stats-grid">
+  <div class="stat-card {{ 'stat-green' if status.active else 'stat-red' }}">
+    <div class="stat-value">{{ '运行中' if status.active else '已停止' }}</div>
+    <div class="stat-label">服务状态</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value">{{ status.connected_clients }}</div>
+    <div class="stat-label">连接客户端</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value">{{ status.host }}</div>
+    <div class="stat-label">服务器地址</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value">{{ status.service }}</div>
+    <div class="stat-label">服务名称</div>
+  </div>
+</div>
+
+{% if role in ('admin', 'operator') %}
+<div class="panel">
+  <h3>服务控制</h3>
+  <div class="btn-group">
+    <form method="POST" action="/service/start" style="display:inline"
+          onsubmit="return confirm('确定启动 OpenVPN 服务吗？')">
+      <button class="btn btn-success btn-lg" {{ 'disabled' if status.active }}>
+        ▶️ 启动服务
+      </button>
+    </form>
+    <form method="POST" action="/service/restart" style="display:inline"
+          onsubmit="return confirm('确定重启 OpenVPN 服务吗？所有客户端将短暂断开。')">
+      <button class="btn btn-warning btn-lg">🔄 重启服务</button>
+    </form>
+    <form method="POST" action="/service/stop" style="display:inline"
+          onsubmit="return confirm('确定停止 OpenVPN 服务吗？所有客户端将断开连接。')">
+      <button class="btn btn-danger btn-lg" {{ 'disabled' if not status.active }}>
+        ⏹️ 停止服务
+      </button>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+<div class="panel">
+  <h3>服务详情</h3>
+  <pre class="code-block">{{ status.status_text }}</pre>
+</div>
+
+<div class="panel">
+  <h3>系统运行时间</h3>
+  <pre class="code-block">{{ status.uptime }}</pre>
+</div>
+
+{% if status.clients %}
+<div class="panel">
+  <h3>已连接客户端</h3>
+  <table class="table">
+    <thead><tr><th>客户端</th><th>IP 地址</th><th>已接收</th><th>已发送</th><th>连接时间</th></tr></thead>
+    <tbody>
+    {% for c in status.clients %}
+    <tr>
+      <td>{{ c.common_name }}</td>
+      <td>{{ c.real_address }}</td>
+      <td>{{ c.bytes_received }}</td>
+      <td>{{ c.bytes_sent }}</td>
+      <td>{{ c.connected_since }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endif %}
+
+{% if host_info %}
+<div class="panel">
+  <h3>主机信息</h3>
+  <div class="info-grid-3">
+    <div>
+      <h4>💾 磁盘</h4>
+      <pre class="code-block small">{{ host_info.disk }}</pre>
+    </div>
+    <div>
+      <h4>🧠 内存</h4>
+      <pre class="code-block small">{{ host_info.memory }}</pre>
+    </div>
+    <div>
+      <h4>🔌 端口</h4>
+      <pre class="code-block small">{{ host_info.ports }}</pre>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% if status %}
+<script>
+// Auto-refresh status every 30 seconds
+setTimeout(function() { location.reload(); }, 30000);
+</script>
+{% endif %}
+{% endblock %}

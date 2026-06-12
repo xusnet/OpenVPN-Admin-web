@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}OpenVPN 服务日志 - OpenVPN Admin{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>📜 OpenVPN 服务日志</h1>
+  <form method="GET" class="inline-form">
+    <label>行数:</label>
+    <select name="lines" onchange="this.form.submit()">
+      <option value="50" {% if lines == 50 %}selected{% endif %}>50</option>
+      <option value="100" {% if lines == 100 %}selected{% endif %}>100</option>
+      <option value="200" {% if lines == 200 %}selected{% endif %}>200</option>
+      <option value="500" {% if lines == 500 %}selected{% endif %}>500</option>
+      <option value="1000" {% if lines == 1000 %}selected{% endif %}>1000</option>
+    </select>
+  </form>
+</div>
+
+{% if error %}
+<div class="flash flash-warning">⚠️ 无法读取日志: {{ error }}</div>
+{% endif %}
+
+<pre class="log-viewer">{% if ovpn_logs %}{{ ovpn_logs }}{% else %}暂无日志{% endif %}</pre>
+
+<div class="action-bar">
+  <button class="btn btn-sm btn-outline" onclick="location.reload()">🔄 刷新</button>
+  <button class="btn btn-sm btn-outline" onclick="window.scrollTo(0, document.body.scrollHeight)">⬇ 滚动到底部</button>
+</div>
+{% endblock %}
