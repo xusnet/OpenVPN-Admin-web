@@ -1,8 +1,42 @@
 """
 OpenVPN Admin — OpenVPN Server Manager
 =======================================
-SSH-based remote management of OpenVPN server.
-Supports: status, start, stop, restart, config read/write, key management, log reading.
+
+SSH-based remote management client for OpenVPN servers.
+
+Uses Paramiko to execute commands on the remote VPN server, providing
+a clean Python API for the Flask web layer. All SSH operations are
+stateless — each method opens a fresh connection, runs its command(s),
+and closes the connection.
+
+Capabilities:
+    - Service lifecycle: status, start, stop, restart (via systemctl)
+    - Configuration: read and update server.conf (with automatic backups)
+    - Key management: list, create, and revoke EasyRSA certificates
+    - Client management: list connected clients, generate .ovpn bundles
+    - Log retrieval: tail OpenVPN logs, fallback to journalctl
+    - Host information: disk usage, memory, listening ports
+
+Authentication:
+    Supports both SSH key and password authentication. Key authentication
+    is preferred — if OPENVPN_SSH_KEY points to an existing file, it is
+    used as an RSA private key. Otherwise, OPENVPN_SSH_PASSWORD is used.
+
+Environment Variables:
+    OPENVPN_HOST         — VPN server hostname/IP (default: 192.168.3.147)
+    OPENVPN_SSH_PORT     — SSH port (default: 22)
+    OPENVPN_SSH_USER     — SSH username (default: root)
+    OPENVPN_SSH_KEY      — Path to RSA private key (default: /app/keys/id_rsa)
+    OPENVPN_SSH_PASSWORD — SSH password (fallback if key not found)
+    OPENVPN_SERVICE      — systemd service name (default: openvpn@server)
+    OPENVPN_CONFIG       — Path to server.conf (default: /etc/openvpn/server/server.conf)
+    OPENVPN_LOG_DIR      — OpenVPN log directory (default: /var/log/openvpn)
+    OPENVPN_EASYRSA_DIR  — EasyRSA installation directory (default: /etc/openvpn/easy-rsa)
+    OPENVPN_CLIENT_DIR   — Client .ovpn output directory (default: /etc/openvpn/client-configs)
+
+Security Note:
+    This module executes shell commands on a remote server as root (via sudo).
+    Ensure the SSH key is restricted and audit logging is enabled.
 """
 
 from __future__ import annotations
@@ -17,9 +51,34 @@ import paramiko
 
 
 class OpenVPNManager:
-    """Manages a remote OpenVPN server via SSH."""
+    """
+    Manages a remote OpenVPN server via SSH.
 
-    def __init__(self):
+    All methods open a fresh SSH connection per operation — there is no
+    persistent connection pool. This simplifies error handling (each call
+    is self-contained) at the cost of connection setup overhead (~100ms).
+
+    Attributes:
+        host (str): VPN server hostname or IP address.
+        port (int): SSH port number.
+        user (str): SSH login username.
+        key_file (str): Path to the RSA private key file.
+        service_name (str): systemd unit name for OpenVPN.
+        config_path (str): Remote path to server.conf.
+        log_dir (str): Remote directory containing OpenVPN logs.
+        easyrsa_dir (str): Remote EasyRSA installation directory.
+        ipp_file (str): Remote IP persistence file path.
+        client_dir (str): Remote directory for generated .ovpn files.
+    """
+
+    def __init__(self) -> None:
+        """
+        Initialize the manager from environment variables.
+
+        All configuration is read from environment variables at init time.
+        None of these values are validated here — connection failures are
+        surfaced when methods are actually called.
+        """
         self.host = os.environ.get("OPENVPN_HOST", "192.168.3.147")
         self.port = int(os.environ.get("OPENVPN_SSH_PORT", "22"))
         self.user = os.environ.get("OPENVPN_SSH_USER", "root")
@@ -31,45 +90,127 @@ class OpenVPNManager:
         self.ipp_file = os.environ.get("OPENVPN_IPP_FILE", "/etc/openvpn/server/ipp.txt")
         self.client_dir = os.environ.get("OPENVPN_CLIENT_DIR", "/etc/openvpn/client-configs")
 
-    # ── SSH helpers ─────────────────────────────────────────────────────
+
+    # ── SSH Helpers ────────────────────────────────────────────────────────
 
     def _ssh(self) -> paramiko.SSHClient:
+        """
+        Create and connect a new Paramiko SSH client.
+
+        Authentication strategy:
+        1. If ``self.key_file`` exists on the local filesystem, use RSA key auth.
+        2. Otherwise, fall back to password auth via OPENVPN_SSH_PASSWORD.
+
+        Returns:
+            paramiko.SSHClient: Connected and authenticated SSH client.
+
+        Raises:
+            paramiko.SSHException: On connection or authentication failure.
+            FileNotFoundError: If the key file path is invalid (RSAKey parsing).
+        """
         client = paramiko.SSHClient()
+
+        # Auto-accept unknown host keys.
+        # In production, consider using known_hosts via
+        # client.load_system_host_keys() for MITM protection.
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        kwargs = dict(hostname=self.host, port=self.port, username=self.user, timeout=15,
-                      allow_agent=False, look_for_keys=False)
+
+        # Build connection kwargs
+        kwargs = dict(
+            hostname=self.host,
+            port=self.port,
+            username=self.user,
+            timeout=15,
+            allow_agent=False,    # Don't use ssh-agent
+            look_for_keys=False,  # Don't scan ~/.ssh/ for keys
+        )
+
+        # Prefer key authentication over password
         if self.key_file and os.path.exists(self.key_file):
             kwargs["pkey"] = paramiko.RSAKey.from_private_key_file(self.key_file)
         else:
             kwargs["password"] = os.environ.get("OPENVPN_SSH_PASSWORD", "")
+
         client.connect(**kwargs)
         return client
 
+
     def _exec(self, command: str, timeout: int = 30, sudo: bool = False) -> tuple[str, str, int]:
+        """
+        Execute a command on the remote VPN server and return its output.
+
+        Opens a fresh SSH connection, runs the command, reads stdout/stderr,
+        and closes the connection. Each call is stateless and self-contained.
+
+        Args:
+            command: The shell command to execute on the remote host.
+            timeout: Maximum seconds to wait for command completion.
+            sudo: If True, prepend ``sudo`` to the command.
+
+        Returns:
+            A tuple of ``(stdout, stderr, exit_code)``. Both stdout and stderr
+            are decoded from UTF-8 with replacement characters for invalid bytes,
+            and stripped of trailing whitespace.
+
+        Raises:
+            paramiko.SSHException: On SSH connection or authentication failure.
+            socket.timeout: If the command exceeds the timeout.
+        """
         if sudo:
             command = f"sudo {command}"
+
         client = self._ssh()
         try:
+            # Execute the command — triple return: stdin, stdout, stderr channels
             _, stdout, stderr = client.exec_command(command, timeout=timeout)
+
+            # Read all output before checking exit status (paramiko recommendation)
             out = stdout.read().decode("utf-8", errors="replace").strip()
             err = stderr.read().decode("utf-8", errors="replace").strip()
             code = stdout.channel.recv_exit_status()
+
             return out, err, code
         finally:
             client.close()
 
-    # ── Service management ──────────────────────────────────────────────
+
+    # ── Service Management ─────────────────────────────────────────────────
 
     def get_status(self) -> dict:
-        """Get OpenVPN service status."""
-        out, err, code = self._exec(f"systemctl status {self.service_name} --no-pager -l", sudo=True)
+        """
+        Get comprehensive OpenVPN service status.
+
+        Fetches:
+        - systemctl status output for detailed service state
+        - Host system uptime
+        - systemctl is-active for a simple boolean active flag
+        - Connected client list with traffic statistics
+
+        Returns:
+            dict with keys:
+                active (bool):          Whether the service is running
+                service (str):          The systemd unit name
+                host (str):             VPN server hostname/IP
+                status_text (str):      Full systemctl status output
+                uptime (str):           Host system uptime string
+                connected_clients (int): Number of currently connected clients
+                clients (list[dict]):   Connected client details
+        """
+        # Get detailed service status
+        out, err, code = self._exec(
+            f"systemctl status {self.service_name} --no-pager -l", sudo=True
+        )
+
+        # Get host uptime
         uptime_out, _, _ = self._exec("uptime")
 
-        # Check if active
-        active_out, _, active_code = self._exec(f"systemctl is-active {self.service_name}", sudo=True)
+        # Check if the service is active (simple boolean)
+        active_out, _, active_code = self._exec(
+            f"systemctl is-active {self.service_name}", sudo=True
+        )
         is_active = "active" in active_out.lower()
 
-        # Get connected clients
+        # Get connected client list
         clients = self.list_clients()
 
         return {
@@ -82,43 +223,129 @@ class OpenVPNManager:
             "clients": clients,
         }
 
+
     def start(self) -> dict:
-        out, err, code = self._exec(f"systemctl start {self.service_name}", sudo=True)
+        """
+        Start the OpenVPN service via systemctl.
+
+        Waits 2 seconds after starting, then verifies the service is active.
+
+        Returns:
+            dict with keys: ``success`` (bool), ``output`` (str), ``active`` (bool).
+        """
+        out, err, code = self._exec(
+            f"systemctl start {self.service_name}", sudo=True
+        )
+
+        # Give systemd a moment to start the service before checking
         time.sleep(2)
-        active_out, _, _ = self._exec(f"systemctl is-active {self.service_name}", sudo=True)
-        return {"success": code == 0, "output": out or err, "active": "active" in active_out.lower()}
+
+        active_out, _, _ = self._exec(
+            f"systemctl is-active {self.service_name}", sudo=True
+        )
+        return {
+            "success": code == 0,
+            "output": out or err,
+            "active": "active" in active_out.lower(),
+        }
+
 
     def stop(self) -> dict:
-        out, err, code = self._exec(f"systemctl stop {self.service_name}", sudo=True)
+        """
+        Stop the OpenVPN service via systemctl.
+
+        Waits 1 second after stopping, then verifies the service is inactive.
+
+        Returns:
+            dict with keys: ``success`` (bool), ``output`` (str), ``active`` (bool).
+        """
+        out, err, code = self._exec(
+            f"systemctl stop {self.service_name}", sudo=True
+        )
+
         time.sleep(1)
-        active_out, _, _ = self._exec(f"systemctl is-active {self.service_name}", sudo=True)
-        return {"success": code == 0, "output": out or err, "active": "active" in active_out.lower()}
+
+        active_out, _, _ = self._exec(
+            f"systemctl is-active {self.service_name}", sudo=True
+        )
+        return {
+            "success": code == 0,
+            "output": out or err,
+            "active": "active" in active_out.lower(),
+        }
+
 
     def restart(self) -> dict:
-        out, err, code = self._exec(f"systemctl restart {self.service_name}", sudo=True)
-        time.sleep(3)
-        active_out, _, _ = self._exec(f"systemctl is-active {self.service_name}", sudo=True)
-        return {"success": code == 0, "output": out or err, "active": "active" in active_out.lower()}
+        """
+        Restart the OpenVPN service via systemctl.
 
-    # ── Configuration ───────────────────────────────────────────────────
+        Waits 3 seconds after restarting (longer than start/stop because
+        OpenVPN needs time to reinitialize tunnels and re-read config).
+
+        Returns:
+            dict with keys: ``success`` (bool), ``output`` (str), ``active`` (bool).
+        """
+        out, err, code = self._exec(
+            f"systemctl restart {self.service_name}", sudo=True
+        )
+
+        time.sleep(3)
+
+        active_out, _, _ = self._exec(
+            f"systemctl is-active {self.service_name}", sudo=True
+        )
+        return {
+            "success": code == 0,
+            "output": out or err,
+            "active": "active" in active_out.lower(),
+        }
+
+
+    # ── Configuration Management ───────────────────────────────────────────
 
     def get_config(self) -> str:
+        """
+        Read the current server.conf from the remote VPN server.
+
+        Returns:
+            str: The complete contents of server.conf.
+
+        Raises:
+            RuntimeError: If the config file cannot be read (SSH error,
+                          file not found, permission denied).
+        """
         out, err, code = self._exec(f"cat {self.config_path}", sudo=True)
         if code != 0:
             raise RuntimeError(f"Failed to read config: {err}")
         return out
 
+
     def update_config(self, new_content: str) -> dict:
-        """Write new server.conf and optionally restart."""
-        # Backup first
+        """
+        Write a new server.conf to the VPN server.
+
+        Safety measures:
+        1. Creates a timestamped backup of the existing config before overwriting
+        2. Writes the new content to a temp file via SFTP
+        3. Atomically moves the temp file to the config path (mv is atomic on
+           the same filesystem)
+
+        Args:
+            new_content: The complete new server.conf content.
+
+        Returns:
+            dict with keys: ``success`` (bool), ``backup`` (str) — path to the
+            timestamped backup file.
+        """
+        # ── Create timestamped backup ──────────────────────────────────
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = f"{self.config_path}.bak.{timestamp}"
         self._exec(f"cp {self.config_path} {backup_path}", sudo=True)
 
-        # Write new config via a temp file then mv (avoids partial writes)
+        # ── Write new config via SFTP ──────────────────────────────────
+        # Using SFTP (not echo/heredoc) to avoid shell escaping issues
+        # with special characters in the config content.
         tmp_path = f"/tmp/openvpn-server.conf.{timestamp}"
-        # Escape the content for echo/heredoc
-        sftp_client = None
         client = self._ssh()
         try:
             sftp = client.open_sftp()
@@ -128,15 +355,31 @@ class OpenVPNManager:
         finally:
             client.close()
 
+        # ── Atomic move into place ─────────────────────────────────────
         self._exec(f"mv {tmp_path} {self.config_path}", sudo=True)
 
         return {"success": True, "backup": backup_path}
 
-    # ── Key management ──────────────────────────────────────────────────
+
+    # ── Key Management ─────────────────────────────────────────────────────
 
     def list_certificates(self) -> list[dict]:
-        """List all certificates from EasyRSA PKI index."""
-        out, err, code = self._exec(f"cat {self.easyrsa_dir}/pki/index.txt", sudo=True)
+        """
+        List all certificates from the EasyRSA PKI index file.
+
+        Parses ``/etc/openvpn/easy-rsa/pki/index.txt`` which has the format:
+        ``<flag> <expiry> <revocation_date> <serial> <filename> <subject>``
+
+        Flag meanings:
+            V = valid, R = revoked, E = expired
+
+        Returns:
+            list[dict]: Each dict has keys: ``common_name``, ``status``,
+                        ``expiry``, ``serial``.
+        """
+        out, err, code = self._exec(
+            f"cat {self.easyrsa_dir}/pki/index.txt", sudo=True
+        )
         if code != 0:
             return []
 
@@ -145,13 +388,18 @@ class OpenVPNManager:
             line = line.strip()
             if not line:
                 continue
+
             parts = line.split()
             if len(parts) >= 5:
                 flag = parts[0]
                 expiry = parts[1]
                 serial = parts[2]
+
+                # Extract CN from the subject DN: /C=XX/ST=XX/.../CN=myclient
                 cn_match = re.search(r"/CN=([^\s/]+)", line)
                 cn = cn_match.group(1) if cn_match else "unknown"
+
+                # Map EasyRSA single-letter status flags to human-readable labels
                 status_map = {"V": "valid", "R": "revoked", "E": "expired"}
                 certs.append({
                     "common_name": cn,
@@ -159,18 +407,45 @@ class OpenVPNManager:
                     "expiry": expiry,
                     "serial": serial,
                 })
+
         return certs
 
+
     def create_client(self, common_name: str) -> dict:
-        """Create a new client certificate and generate .ovpn file."""
-        # Build client cert
-        cmd = f"cd {self.easyrsa_dir} && echo -e '\\n\\n\\n\\n\\n\\n' | ./easyrsa build-client-full {common_name} nopass"
+        """
+        Create a new client certificate and generate an .ovpn config file.
+
+        Two-step process:
+        1. Build client cert: ``easyrsa build-client-full <cn> nopass``
+        2. Generate .ovpn bundle: inline the CA cert, client cert, client key,
+           and (optionally) TLS auth key into a single file.
+
+        Args:
+            common_name: The client's Common Name (used as both the cert CN
+                         and the .ovpn filename).
+
+        Returns:
+            dict with keys: ``success`` (bool), ``common_name`` (str),
+            ``ovpn_path`` (str — remote path to the generated .ovpn file),
+            and optionally ``error`` (str) on failure.
+        """
+        # ── Step 1: Build client certificate ──────────────────────────
+        # EasyRSA prompts for several fields interactively; we pipe empty
+        # lines to accept all defaults. 'nopass' = no private key passphrase.
+        cmd = (
+            f"cd {self.easyrsa_dir} && "
+            f"echo -e '\\n\\n\\n\\n\\n\\n' | "
+            f"./easyrsa build-client-full {common_name} nopass"
+        )
         out, err, code = self._exec(cmd, timeout=60, sudo=True)
         if code != 0:
             return {"success": False, "error": err or out}
 
-        # Generate .ovpn file
+        # ── Step 2: Generate .ovpn bundle ─────────────────────────────
         ovpn_path = f"{self.client_dir}/{common_name}.ovpn"
+
+        # Multi-line shell script: extract certs and keys, then assemble
+        # them into an inline OpenVPN client config file.
         gen_cmd = f"""
 CA_CERT=$(cat {self.easyrsa_dir}/pki/ca.crt)
 CLIENT_CERT=$(sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' {self.easyrsa_dir}/pki/issued/{common_name}.crt)
@@ -202,22 +477,48 @@ OVPNEOF
 """
         out2, err2, code2 = self._exec(gen_cmd, timeout=30, sudo=True)
         if code2 != 0:
-            return {"success": False, "error": f"Cert built but ovpn generation failed: {err2}"}
+            return {
+                "success": False,
+                "error": f"Cert built but ovpn generation failed: {err2}"
+            }
 
-        return {"success": True, "common_name": common_name, "ovpn_path": ovpn_path}
+        return {
+            "success": True,
+            "common_name": common_name,
+            "ovpn_path": ovpn_path,
+        }
+
 
     def revoke_client(self, common_name: str) -> dict:
-        """Revoke a client certificate."""
+        """
+        Revoke a client certificate and update the Certificate Revocation List.
+
+        Two-step process:
+        1. Revoke: ``easyrsa revoke <cn>`` (auto-confirms 'yes')
+        2. Regenerate CRL: ``easyrsa gen-crl`` (makes the revocation effective)
+
+        Args:
+            common_name: The client's Common Name to revoke.
+
+        Returns:
+            dict with keys: ``success`` (bool), ``common_name`` (str),
+            ``crl_updated`` (bool — whether CRL regeneration succeeded),
+            and ``output`` (str — EasyRSA command output).
+        """
+        # ── Revoke the certificate ────────────────────────────────────
         out, err, code = self._exec(
             f"cd {self.easyrsa_dir} && echo 'yes' | ./easyrsa revoke {common_name}",
-            timeout=30, sudo=True
+            timeout=30,
+            sudo=True,
         )
         if code != 0:
             return {"success": False, "error": err or out}
 
-        # Update CRL
+        # ── Regenerate CRL to enforce the revocation ──────────────────
         crl_out, crl_err, crl_code = self._exec(
-            f"cd {self.easyrsa_dir} && ./easyrsa gen-crl", timeout=30, sudo=True
+            f"cd {self.easyrsa_dir} && ./easyrsa gen-crl",
+            timeout=30,
+            sudo=True,
         )
 
         return {
@@ -227,8 +528,18 @@ OVPNEOF
             "output": out,
         }
 
+
     def download_client_config(self, common_name: str) -> bytes | None:
-        """Download the .ovpn client config file content."""
+        """
+        Download a client's .ovpn configuration file via SFTP.
+
+        Args:
+            common_name: The client's Common Name (matches the .ovpn filename).
+
+        Returns:
+            bytes: The complete .ovpn file content as UTF-8 encoded bytes,
+                   or None if the file does not exist on the server.
+        """
         ovpn_path = f"{self.client_dir}/{common_name}.ovpn"
         client = self._ssh()
         try:
@@ -241,24 +552,48 @@ OVPNEOF
         finally:
             client.close()
 
+
     def get_client_config_base64(self, common_name: str) -> str | None:
-        """Get client config as base64 string."""
+        """
+        Get a client's .ovpn config as a base64-encoded string.
+
+        Useful for API responses or embedding in HTML data URIs.
+
+        Args:
+            common_name: The client's Common Name.
+
+        Returns:
+            str: Base64-encoded .ovpn file content, or None if not found.
+        """
         import base64
         content = self.download_client_config(common_name)
         if content:
             return base64.b64encode(content).decode()
         return None
 
-    # ── Clients ─────────────────────────────────────────────────────────
+
+    # ── Connected Clients ──────────────────────────────────────────────────
 
     def list_clients(self) -> list[dict]:
-        """Parse OpenVPN status log for connected clients."""
+        """
+        Parse the OpenVPN status log to list currently connected clients.
+
+        Searches several common status file locations, parsing the
+        comma-separated format used by OpenVPN's ``status`` directive:
+        ``Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since``
+
+        Returns:
+            list[dict]: Each dict has keys: ``common_name``, ``real_address``,
+                        ``bytes_received``, ``bytes_sent``, ``connected_since``.
+        """
+        # Common locations for OpenVPN status files
         status_files = [
             f"{self.log_dir}/openvpn-status.log",
             f"{self.log_dir}/status.log",
             "/var/log/openvpn-status.log",
             "/run/openvpn-server/status.log",
         ]
+
         raw = ""
         for sf in status_files:
             out, _, code = self._exec(f"cat {sf}", sudo=True)
@@ -269,17 +604,33 @@ OVPNEOF
         if not raw:
             return []
 
+        # ── Parse the OpenVPN status file ─────────────────────────────
+        # Format:
+        #   OpenVPN CLIENT LIST
+        #   Updated,...
+        #   Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since
+        #   client1,10.8.0.2:12345,1234567,9876543,Mon Jun  9 15:30:00 2025
+        #   ROUTING TABLE
+        #   ...
+        #   GLOBAL STATS
+        #   ...
         clients = []
         in_section = False
         for line in raw.splitlines():
             line = line.strip()
+
+            # Section start: the header row indicating the CLIENT LIST
             if line.startswith("Common Name"):
                 in_section = True
                 continue
+
+            # Section end: ROUTING TABLE or GLOBAL STATS terminates the client list
             if line.startswith("ROUTING TABLE") or line.startswith("GLOBAL STATS"):
                 break
+
             if not in_section or not line:
                 continue
+
             parts = [p.strip() for p in line.split(",")]
             if len(parts) >= 5:
                 clients.append({
@@ -289,32 +640,68 @@ OVPNEOF
                     "bytes_sent": parts[3],
                     "connected_since": parts[4],
                 })
+
         return clients
 
-    # ── Logs ────────────────────────────────────────────────────────────
+
+    # ── Log Retrieval ──────────────────────────────────────────────────────
 
     def get_logs(self, lines: int = 200) -> str:
-        """Get recent OpenVPN server logs."""
+        """
+        Get the most recent OpenVPN server log entries.
+
+        Tries common log file locations first, falling back to journalctl
+        if none are found.
+
+        Args:
+            lines: Number of log lines to retrieve (default: 200).
+
+        Returns:
+            str: Recent log content, or empty string if no logs are available.
+        """
+        # Common OpenVPN log file locations
         log_files = [
             f"{self.log_dir}/openvpn.log",
             f"{self.log_dir}/server.log",
             "/var/log/openvpn.log",
         ]
+
         for lf in log_files:
             out, _, code = self._exec(f"tail -n {lines} {lf}", sudo=True)
             if code == 0 and out.strip():
                 return out
 
-        # Fallback to journalctl
-        out, _, _ = self._exec(f"journalctl -u {self.service_name} --no-pager -n {lines}", sudo=True)
+        # Fallback: use journalctl to read systemd journal entries
+        out, _, _ = self._exec(
+            f"journalctl -u {self.service_name} --no-pager -n {lines}",
+            sudo=True,
+        )
         return out
 
-    # ── Host info ───────────────────────────────────────────────────────
+
+    # ── Host Information ───────────────────────────────────────────────────
 
     def get_host_info(self) -> dict:
+        """
+        Collect basic host system information from the VPN server.
+
+        Gathers:
+        - Disk usage (df -h /)
+        - Memory usage (free -m)
+        - Listening ports related to OpenVPN (port 1194, 943) or top 20 if none
+
+        Returns:
+            dict with keys: ``disk`` (str), ``memory`` (str), ``ports`` (str).
+        """
         df_out, _, _ = self._exec("df -h /")
         mem_out, _, _ = self._exec("free -m")
-        ss_out, _, _ = self._exec("ss -tlnp | grep -E '1194|943|openvpn' || ss -tlnp | head -20")
+
+        # Try to find OpenVPN-related listening ports first, then fall back
+        # to showing the top 20 listeners for general diagnostics.
+        ss_out, _, _ = self._exec(
+            "ss -tlnp | grep -E '1194|943|openvpn' || ss -tlnp | head -20"
+        )
+
         return {
             "disk": df_out,
             "memory": mem_out,
