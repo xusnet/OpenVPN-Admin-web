@@ -1,19 +1,22 @@
 {% extends "base.html" %}
 {% block title %}用户管理 - OpenVPN Admin{% endblock %}
 {% block content %}
-<h2>👥 用户管理</h2>
+<div class="page-header">
+  <h1>👥 用户管理</h1>
+</div>
 
 <div class="panel">
   <h3>创建用户</h3>
   <form method="POST" action="/users/create" class="inline-form">
-    <input type="text" name="username" placeholder="用户名" required>
-    <input type="password" name="password" placeholder="密码 (至少6位)" required minlength="6">
-    <select name="role">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="text" name="username" class="input-sm" placeholder="用户名" required>
+    <input type="password" name="password" class="input-sm" placeholder="密码 (至少6位)" required minlength="6">
+    <select name="role" class="input-sm">
       <option value="viewer">Viewer (只读)</option>
       <option value="operator">Operator (操作员)</option>
       <option value="admin">Admin (管理员)</option>
     </select>
-    <input type="email" name="email" placeholder="邮箱 (可选)">
+    <input type="email" name="email" class="input-sm" placeholder="邮箱 (可选)">
     <button type="submit" class="btn btn-primary">创建</button>
   </form>
 </div>
@@ -39,6 +42,7 @@
       <td class="actions">
         {% if u.username != username %}
         <form method="POST" action="/users/{{ u.id }}/toggle" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button class="btn btn-sm {{ 'btn-warning' if u.is_active else 'btn-success' }}">
             {{ '禁用' if u.is_active else '启用' }}
           </button>
@@ -46,6 +50,7 @@
         <button class="btn btn-sm btn-info" onclick="resetPassword({{ u.id }}, '{{ u.username }}')">重置密码</button>
         <form method="POST" action="/users/{{ u.id }}/delete" style="display:inline"
               onsubmit="return confirm('确定删除用户 {{ u.username }} 吗？此操作不可撤销。')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button class="btn btn-sm btn-danger">删除</button>
         </form>
         {% else %}
@@ -59,13 +64,14 @@
 </div>
 
 <!-- Reset Password Modal -->
-<div id="resetPwModal" class="modal" style="display:none">
+<div id="resetPwModal" class="modal">
   <div class="modal-content">
     <h3>重置密码 - <span id="resetPwUser"></span></h3>
     <form id="resetPwForm" method="POST">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div class="form-group">
         <label>新密码</label>
-        <input type="password" name="new_password" required minlength="6" placeholder="至少6位">
+        <input type="password" name="new_password" class="input" required minlength="6" placeholder="至少6位">
       </div>
       <div class="modal-actions">
         <button type="submit" class="btn btn-primary">确认重置</button>

@@ -1,7 +1,9 @@
 {% extends "base.html" %}
 {% block title %}配置编辑 - OpenVPN Admin{% endblock %}
 {% block content %}
-<h2>📝 配置编辑</h2>
+<div class="page-header">
+  <h1>📝 配置编辑</h1>
+</div>
 
 {% if error %}
 <div class="flash flash-danger">⚠️ 无法读取服务器配置: {{ error }}</div>
@@ -14,14 +16,13 @@
     每次保存会自动创建备份文件。
   </p>
   <form method="POST" action="/config/update">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="form-group">
       <textarea name="config_content" rows="25" class="config-editor"
-                style="font-family:monospace;width:100%;padding:12px;border:1px solid #d9e2ec;border-radius:6px;background:#1e1e2e;color:#cdd6f4;font-size:13px;line-height:1.6"
       >{{ config }}</textarea>
     </div>
     <div class="form-group">
-      <input type="text" name="comment" placeholder="修改说明 (可选)"
-             style="width:100%;padding:8px 12px;border:1px solid #d9e2ec;border-radius:6px">
+      <input type="text" name="comment" class="input" placeholder="修改说明 (可选)">
     </div>
     <button type="submit" class="btn btn-primary btn-lg"
             onclick="return confirm('确定保存配置吗？修改后需要重启服务才能生效。')">

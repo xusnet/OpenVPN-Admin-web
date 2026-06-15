@@ -5,7 +5,7 @@
   <h1>📜 OpenVPN 服务日志</h1>
   <form method="GET" class="inline-form">
     <label>行数:</label>
-    <select name="lines" onchange="this.form.submit()">
+    <select name="lines" class="input-sm" onchange="this.form.submit()">
       <option value="50" {% if lines == 50 %}selected{% endif %}>50</option>
       <option value="100" {% if lines == 100 %}selected{% endif %}>100</option>
       <option value="200" {% if lines == 200 %}selected{% endif %}>200</option>

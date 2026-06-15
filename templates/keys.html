@@ -1,15 +1,18 @@
 {% extends "base.html" %}
 {% block title %}密钥管理 - OpenVPN Admin{% endblock %}
 {% block content %}
-<h2>🔑 密钥管理</h2>
+<div class="page-header">
+  <h1>🔑 密钥管理</h1>
+</div>
 
 {% if role in ('admin', 'operator') %}
 <div class="panel">
   <h3>申请新密钥</h3>
   <form method="POST" action="/keys/create" class="inline-form">
-    <input type="text" name="common_name" placeholder="客户端名称 (如: zhangsan-laptop)"
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="text" name="common_name" class="input-sm" placeholder="客户端名称 (如: zhangsan-laptop)"
            required pattern="[a-zA-Z0-9_\-\.]+" style="min-width:260px">
-    <input type="text" name="description" placeholder="备注说明 (可选)">
+    <input type="text" name="description" class="input-sm" placeholder="备注说明 (可选)">
     <button type="submit" class="btn btn-primary">生成密钥</button>
   </form>
   <p class="text-muted" style="margin-top:8px">客户端名称只能包含字母、数字、下划线、连字符和点</p>
@@ -44,6 +47,7 @@
         {% if role in ('admin', 'operator') %}
         <form method="POST" action="/keys/{{ r.common_name }}/revoke" style="display:inline"
               onsubmit="return confirm('确定吊销 {{ r.common_name }} 的密钥吗？吊销后客户端将无法连接。')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button class="btn btn-sm btn-danger">🚫 吊销</button>
         </form>
         {% endif %}

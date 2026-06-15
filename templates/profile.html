@@ -11,6 +11,7 @@
   </div>
   <div class="card-body">
     <form method="POST">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div class="form-group">
         <label for="current_password">当前密码</label>
         <input type="password" id="current_password" name="current_password" class="input" required autocomplete="current-password">
