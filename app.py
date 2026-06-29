@@ -50,34 +50,20 @@ Usage:
 
 # ── Standard library imports ──────────────────────────────────────────────
 import io
+import json
 import os
 import re
-import sqlite3
-import time
+from datetime import datetime, timezone
 
 # ── Third-party imports ───────────────────────────────────────────────────
 from flask import (
     Flask, render_template, request, redirect, url_for, flash,
-    session, jsonify, send_file
+    session, g, jsonify, send_file, Response
 )
-
-# ── Environment file loading ──────────────────────────────────────────────
-# Load variables from a .env file in the project root before any module
-# reads its configuration from os.environ. This makes local development
-# easier without hard-coding host paths or secrets in the source code.
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:  # pragma: no cover
-    # python-dotenv is optional; if absent, rely purely on real env vars.
-    pass
 
 # ── Application modules ───────────────────────────────────────────────────
 from database import init_db, get_db, db_session
-from auth import (
-    auth_bp, login_required, role_required, _audit, hash_password,
-    get_csrf_token, validate_csrf_token
-)
+from auth import auth_bp, login_required, role_required, _audit, hash_password, verify_password
 from openvpn import OpenVPNManager
 
 
@@ -98,35 +84,6 @@ app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 
 # Register the authentication blueprint (handles /login, /logout, /profile)
 app.register_blueprint(auth_bp)
-
-# Initialize database on import — ensures tables exist and default admin
-# is seeded when running under gunicorn (Docker) where __main__ is not used.
-init_db()
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  Jinja2 Filters
-# ═══════════════════════════════════════════════════════════════════════════
-
-@app.template_filter("fmt_bytes")
-def fmt_bytes(value) -> str:
-    """
-    Format a raw byte count as a human-readable string (B / KB / MB / GB).
-
-    Accepts int, str (containing an int), or anything ``int()`` can parse.
-    Returns ``'-'`` for unparseable input so the template never breaks.
-    """
-    try:
-        n = int(value)
-    except (TypeError, ValueError):
-        return "-"
-    if n < 0:
-        return "-"
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024:
-            return f"{n:.1f} {unit}" if unit != "B" else f"{n} {unit}"
-        n /= 1024
-    return f"{n:.1f} PB"
 
 
 # ── Lazy initialization of OpenVPN manager ────────────────────────────────
@@ -163,79 +120,18 @@ def inject_globals() -> dict:
     Inject common variables into all Jinja2 templates.
 
     Called automatically by Flask before every render_template().
-    Makes ``username`` and ``role`` available in every template without
-    needing to pass them explicitly in each route.
+    Makes ``username``, ``role``, and ``now`` available in every template
+    without needing to pass them explicitly in each route.
 
     Returns:
-        dict: Variables accessible as ``{{ username }}`` and ``{{ role }}``
-              in all templates.
+        dict: Variables accessible as ``{{ username }}``, ``{{ role }}``,
+              and ``{{ now }}`` in all templates.
     """
     return {
         "username": session.get("username", ""),
         "role": session.get("role", "viewer"),
-        "csrf_token": get_csrf_token(),
+        "now": datetime.now(),
     }
-
-
-# ── Session timeout enforcement ────────────────────────────────────────────
-# Check session age on every request. If the session has been idle longer
-# than SESSION_TIMEOUT seconds, clear it and redirect to login.
-#
-# NOTE: Flask's default session is a client-side cookie that must remain
-# JSON-serializable. We store ``_last_activity`` as a Unix timestamp (int)
-# rather than a datetime object to keep it serializable.
-
-SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "3600"))
-
-
-@app.before_request
-def _security_middleware():
-    """
-    Global security middleware run before every request.
-
-    Performs two checks:
-    1. CSRF token validation for every state-changing request (POST/PUT/
-       PATCH/DELETE), including the login form submission.
-    2. Session idle timeout enforcement for authenticated users. If the
-       session has exceeded SESSION_TIMEOUT seconds since the last activity,
-       the session is cleared and the user is redirected to login.
-
-    Static assets are fully exempt. The login page is exempt from timeout
-    checks (it handles its own logic), but CSRF is still validated there.
-    """
-    # Static files are fully exempt.
-    if request.endpoint == "static":
-        return
-
-    # 1) Validate CSRF token for all state-changing requests (including login).
-    # The login form GET sets a token via the context processor, so even an
-    # unauthenticated POST can be verified. Safe methods are ignored.
-    validate_csrf_token()
-
-    # Login page: no session-timeout check needed here (it is handled by
-    # the route itself and session is recreated on success).
-    if request.endpoint == "auth.login_page":
-        return
-
-    # 2) Session idle timeout — only for authenticated users.
-    if "username" not in session:
-        return
-
-    last_activity = session.get("_last_activity")
-    if last_activity is not None:
-        try:
-            elapsed = time.time() - float(last_activity)
-        except (TypeError, ValueError):
-            # Corrupt or non-numeric value (e.g. legacy datetime string
-            # from a previous deploy) — refresh it and move on.
-            elapsed = 0
-        if elapsed > SESSION_TIMEOUT:
-            session.clear()
-            flash("会话已过期，请重新登录", "info")
-            return redirect(url_for("auth.login_page"))
-
-    # Update last activity timestamp (Unix epoch seconds).
-    session["_last_activity"] = time.time()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -330,8 +226,7 @@ def users_create():
     """
     # Extract and sanitize form fields
     username = request.form.get("username", "").strip()
-    # Do not strip passwords — whitespace can be intentional.
-    password = request.form.get("password", "")
+    password = request.form.get("password", "").strip()
     role = request.form.get("role", "viewer")
     email = request.form.get("email", "").strip()
 
@@ -348,10 +243,6 @@ def users_create():
         flash("密码长度至少6位", "warning")
         return redirect(url_for("users_list"))
 
-    if email and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
-        flash("邮箱格式不正确", "warning")
-        return redirect(url_for("users_list"))
-
     # ── Persist to database ───────────────────────────────────────────
     try:
         with db_session() as db:
@@ -361,9 +252,6 @@ def users_create():
             )
         _audit("create_user", f"username={username} role={role}")
         flash(f"用户 {username} 创建成功", "success")
-    except sqlite3.IntegrityError:
-        # Most likely the username UNIQUE constraint was violated.
-        flash(f"用户名 {username} 已存在", "warning")
     except Exception as e:
         flash(f"创建失败: {e}", "danger")
 
@@ -471,8 +359,7 @@ def users_reset_password(user_id: int):
     Returns:
         Redirect to user list with flash message.
     """
-    # Do not strip passwords — whitespace can be intentional.
-    new_pw = request.form.get("new_password", "")
+    new_pw = request.form.get("new_password", "").strip()
     if len(new_pw) < 6:
         flash("密码长度至少6位", "warning")
         return redirect(url_for("users_list"))
@@ -556,10 +443,9 @@ def keys_create():
         return redirect(url_for("keys_list"))
 
     # Restrict CN to safe characters to prevent shell injection and
-    # EasyRSA parameter contamination. Cap at 64 chars for parity with
-    # the OpenVPN-side validation in OpenVPNManager.
-    if not re.match(r"^[a-zA-Z0-9_\-\.]{1,64}$", common_name):
-        flash("客户端名称只能包含字母、数字、下划线、连字符和点 (最多64字符)", "warning")
+    # EasyRSA parameter contamination.
+    if not re.match(r"^[a-zA-Z0-9_\-\.]+$", common_name):
+        flash("客户端名称只能包含字母、数字、下划线、连字符和点", "warning")
         return redirect(url_for("keys_list"))
 
     # ── Check for duplicate active key ────────────────────────────────
@@ -586,26 +472,12 @@ def keys_create():
         return redirect(url_for("keys_list"))
 
     # ── Record issuance in database ───────────────────────────────────
-    try:
-        with db_session() as db:
-            db.execute(
-                "INSERT INTO key_records (common_name, status, issued_by, description) "
-                "VALUES (?, 'active', ?, ?)",
-                (common_name, session["username"], description)
-            )
-    except sqlite3.IntegrityError:
-        # Race condition: another request inserted the same CN between
-        # the existence check above and this insert. The certificate and
-        # .ovpn file already exist on the server, but we have no local
-        # record. Revoke the freshly-created certificate to keep server
-        # and DB state consistent; ignore CRL failures here because the
-        # primary problem is the duplicate CN.
-        try:
-            get_ovpn().revoke_client(common_name)
-        except Exception:
-            pass
-        flash(f"客户端 {common_name} 已被其他管理员创建", "warning")
-        return redirect(url_for("keys_list"))
+    with db_session() as db:
+        db.execute(
+            "INSERT INTO key_records (common_name, status, issued_by, description) "
+            "VALUES (?, 'active', ?, ?)",
+            (common_name, session["username"], description)
+        )
 
     _audit("create_key", f"cn={common_name}")
     flash(f"客户端 {common_name} 密钥创建成功", "success")
@@ -684,18 +556,7 @@ def keys_revoke(common_name: str):
         )
 
     _audit("revoke_key", f"cn={common_name}")
-
-    # The cert is revoked on the server, but if the CRL was not regenerated
-    # the client can still authenticate. Surface this prominently so the
-    # operator knows the revocation may not be enforced yet.
-    if not result.get("crl_updated"):
-        flash(
-            f"客户端 {common_name} 密钥已吊销, 但 CRL 未更新, 客户端暂时仍可连接, "
-            "请手动执行: cd /etc/openvpn/easy-rsa && ./easyrsa gen-crl",
-            "warning",
-        )
-    else:
-        flash(f"客户端 {common_name} 密钥已吊销", "success")
+    flash(f"客户端 {common_name} 密钥已吊销", "success")
     return redirect(url_for("keys_list"))
 
 
@@ -1026,8 +887,9 @@ def server_error(e: Exception) -> tuple:
 # ═══════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    # Database is initialized at module import time (line 90) to support
-    # both `python app.py` and `gunicorn app:app` (Docker).
+    # Initialize database — creates tables and seeds default admin user
+    # on first run if the database file doesn't exist.
+    init_db()
 
     # Read runtime configuration from environment variables
     host = os.environ.get("HOST", "0.0.0.0")

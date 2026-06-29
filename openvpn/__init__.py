@@ -45,6 +45,7 @@ import os
 import re
 import time
 from datetime import datetime, timezone
+from typing import Any
 
 import paramiko
 
@@ -69,28 +70,6 @@ class OpenVPNManager:
         ipp_file (str): Remote IP persistence file path.
         client_dir (str): Remote directory for generated .ovpn files.
     """
-
-    # Allow only safe characters in a client Common Name. This is used
-    # by every method that interpolates ``common_name`` into a shell
-    # command or filesystem path, providing defense in depth against
-    # path traversal and shell injection even if the caller forgets to
-    # validate the value itself.
-    _CN_RE = re.compile(r"^[a-zA-Z0-9_\-\.]{1,64}$")
-
-    @classmethod
-    def _validate_cn(cls, common_name: str) -> None:
-        """
-        Validate a client Common Name (defense in depth).
-
-        Raises:
-            ValueError: If ``common_name`` contains anything other than
-                        letters, digits, ``_``, ``-``, ``.`` (max 64 chars).
-        """
-        if not common_name or not cls._CN_RE.match(common_name):
-            raise ValueError(
-                f"Invalid common name: {common_name!r}. "
-                "Allowed: letters, digits, '_', '-', '.' (max 64 chars)."
-            )
 
     def __init__(self) -> None:
         """
@@ -346,92 +325,38 @@ class OpenVPNManager:
         Write a new server.conf to the VPN server.
 
         Safety measures:
-        1. Verifies the existing config can be read before changing anything
-        2. Creates a timestamped backup of the existing config and verifies
-           the backup succeeded (refuses to continue on backup failure)
-        3. Writes the new content to a temp file via SFTP and verifies the
-           size on disk matches what we tried to write
-        4. Atomically moves the temp file to the config path (mv is atomic
-           on the same filesystem); falls back to cat+rm if mv fails
+        1. Creates a timestamped backup of the existing config before overwriting
+        2. Writes the new content to a temp file via SFTP
+        3. Atomically moves the temp file to the config path (mv is atomic on
+           the same filesystem)
 
         Args:
             new_content: The complete new server.conf content.
 
         Returns:
-            dict with keys: ``success`` (bool), ``backup`` (str) — path to
-            the timestamped backup file.
-
-        Raises:
-            RuntimeError: If the existing config is unreadable, the backup
-                          cannot be created, or the SFTP write fails.
+            dict with keys: ``success`` (bool), ``backup`` (str) — path to the
+            timestamped backup file.
         """
-        # ── Sanity-check the existing config first ─────────────────────
-        # If we cannot read the current config, something is fundamentally
-        # wrong and we must not proceed with overwriting it.
-        pre_check, pre_err, pre_code = self._exec(
-            f"test -r {self.config_path}", sudo=True
-        )
-        if pre_code != 0:
-            raise RuntimeError(
-                f"Cannot read existing config at {self.config_path}: {pre_err}"
-            )
-
         # ── Create timestamped backup ──────────────────────────────────
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = f"{self.config_path}.bak.{timestamp}"
-
-        _, cp_err, cp_code = self._exec(
-            f"cp -p {self.config_path} {backup_path}", sudo=True
-        )
-        if cp_code != 0:
-            raise RuntimeError(
-                f"Failed to create config backup at {backup_path}: {cp_err}"
-            )
+        self._exec(f"cp {self.config_path} {backup_path}", sudo=True)
 
         # ── Write new config via SFTP ──────────────────────────────────
         # Using SFTP (not echo/heredoc) to avoid shell escaping issues
         # with special characters in the config content.
         tmp_path = f"/tmp/openvpn-server.conf.{timestamp}"
-        written_bytes = 0
         client = self._ssh()
         try:
             sftp = client.open_sftp()
-            try:
-                with sftp.file(tmp_path, "w") as f:
-                    f.write(new_content)
-                # Verify what we wrote by stat'ing the file on the server.
-                # paramiko's SFTP write can silently truncate on partial
-                # failures (network glitch, disk full, permission denied),
-                # so we must check the file size matches the input.
-                remote_stat = sftp.stat(tmp_path)
-                written_bytes = remote_stat.st_size
-            finally:
-                sftp.close()
-        except Exception as exc:
-            # Best-effort cleanup of the temp file on the server.
-            self._exec(f"rm -f {tmp_path}", sudo=True)
-            raise RuntimeError(f"SFTP write failed: {exc}") from exc
+            with sftp.file(tmp_path, "w") as f:
+                f.write(new_content)
+            sftp.chmod(tmp_path, 0o644)
         finally:
             client.close()
 
-        expected_bytes = len(new_content.encode("utf-8"))
-        if written_bytes != expected_bytes:
-            self._exec(f"rm -f {tmp_path}", sudo=True)
-            raise RuntimeError(
-                f"SFTP write size mismatch: wrote {written_bytes} bytes, "
-                f"expected {expected_bytes}. Aborting to protect config."
-            )
-
         # ── Atomic move into place ─────────────────────────────────────
-        _, mv_err, mv_code = self._exec(
-            f"mv {tmp_path} {self.config_path}", sudo=True
-        )
-        if mv_code != 0:
-            # Best-effort cleanup if the move failed.
-            self._exec(f"rm -f {tmp_path}", sudo=True)
-            raise RuntimeError(
-                f"Failed to move new config into place: {mv_err}"
-            )
+        self._exec(f"mv {tmp_path} {self.config_path}", sudo=True)
 
         return {"success": True, "backup": backup_path}
 
@@ -497,19 +422,13 @@ class OpenVPNManager:
 
         Args:
             common_name: The client's Common Name (used as both the cert CN
-                         and the .ovpn filename). Must match ``_CN_RE``.
+                         and the .ovpn filename).
 
         Returns:
             dict with keys: ``success`` (bool), ``common_name`` (str),
             ``ovpn_path`` (str — remote path to the generated .ovpn file),
             and optionally ``error`` (str) on failure.
         """
-        # Defense in depth: validate the CN even if the caller already did.
-        try:
-            self._validate_cn(common_name)
-        except ValueError as e:
-            return {"success": False, "error": str(e)}
-
         # ── Step 1: Build client certificate ──────────────────────────
         # EasyRSA prompts for several fields interactively; we pipe empty
         # lines to accept all defaults. 'nopass' = no private key passphrase.
@@ -527,18 +446,13 @@ class OpenVPNManager:
 
         # Multi-line shell script: extract certs and keys, then assemble
         # them into an inline OpenVPN client config file.
-        #
-        # IMPORTANT: We use an *unquoted* heredoc delimiter (OVPNEOF) so
-        # that shell variables ($CA_CERT, $CLIENT_CERT, ...) are expanded.
-        # A quoted delimiter ('OVPNEOF') would write the literal strings
-        # "$CA_CERT" into the .ovpn file, producing an invalid profile.
         gen_cmd = f"""
 CA_CERT=$(cat {self.easyrsa_dir}/pki/ca.crt)
 CLIENT_CERT=$(sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' {self.easyrsa_dir}/pki/issued/{common_name}.crt)
 CLIENT_KEY=$(cat {self.easyrsa_dir}/pki/private/{common_name}.key)
 TLS_KEY=$(cat /etc/openvpn/server/ta.key 2>/dev/null || echo '')
 
-cat > {ovpn_path} << OVPNEOF
+cat > {ovpn_path} << 'OVPNEOF'
 client
 dev tun
 proto udp
@@ -560,38 +474,12 @@ $CLIENT_CERT
 $CLIENT_KEY
 </key>
 OVPNEOF
-
-# Optionally append TLS auth key if one exists on the server
-if [ -n "$TLS_KEY" ]; then
-    cat >> {ovpn_path} << OVPNEOF
-<tls-auth>
-$TLS_KEY
-</tls-auth>
-key-direction 1
-OVPNEOF
-fi
 """
         out2, err2, code2 = self._exec(gen_cmd, timeout=30, sudo=True)
         if code2 != 0:
             return {
                 "success": False,
                 "error": f"Cert built but ovpn generation failed: {err2}"
-            }
-
-        # ── Verify the generated profile is non-empty and contains certs ─
-        verify_out, _, verify_code = self._exec(
-            f"grep -E '(BEGIN CERTIFICATE|BEGIN PRIVATE KEY|BEGIN OPENVPN PRIVATE KEY)' {ovpn_path} | wc -l",
-            sudo=True
-        )
-        try:
-            cert_lines = int(verify_out.strip())
-        except (ValueError, AttributeError):
-            cert_lines = 0
-        if verify_code != 0 or cert_lines < 2:
-            return {
-                "success": False,
-                "error": "Generated .ovpn file appears invalid (missing certificates). "
-                         "Check that /etc/openvpn/server/ta.key and EasyRSA PKI files exist."
             }
 
         return {
@@ -610,22 +498,13 @@ fi
         2. Regenerate CRL: ``easyrsa gen-crl`` (makes the revocation effective)
 
         Args:
-            common_name: The client's Common Name to revoke. Must match
-                         ``_CN_RE``.
+            common_name: The client's Common Name to revoke.
 
         Returns:
             dict with keys: ``success`` (bool), ``common_name`` (str),
             ``crl_updated`` (bool — whether CRL regeneration succeeded),
             and ``output`` (str — EasyRSA command output).
         """
-        # Defense in depth: validate the CN before interpolating it into
-        # a shell command. An invalid CN would either fail later in a
-        # confusing way or, worse, be interpreted by the shell.
-        try:
-            self._validate_cn(common_name)
-        except ValueError as e:
-            return {"success": False, "error": str(e)}
-
         # ── Revoke the certificate ────────────────────────────────────
         out, err, code = self._exec(
             f"cd {self.easyrsa_dir} && echo 'yes' | ./easyrsa revoke {common_name}",
@@ -655,35 +534,21 @@ fi
         Download a client's .ovpn configuration file via SFTP.
 
         Args:
-            common_name: The client's Common Name (matches the .ovpn
-                         filename). Must match ``_CN_RE``; CNs containing
-                         ``..`` or path separators are rejected to defend
-                         against path traversal on the server filesystem.
+            common_name: The client's Common Name (matches the .ovpn filename).
 
         Returns:
             bytes: The complete .ovpn file content as UTF-8 encoded bytes,
                    or None if the file does not exist on the server.
         """
-        # Defense in depth: validate the CN to prevent path traversal.
-        # While the Flask route already validates this, a future caller
-        # might forget — refuse anything that could escape the client
-        # config directory.
-        try:
-            self._validate_cn(common_name)
-        except ValueError:
-            return None
-
         ovpn_path = f"{self.client_dir}/{common_name}.ovpn"
         client = self._ssh()
         try:
             sftp = client.open_sftp()
             try:
-                with sftp.file(ovpn_path, "rb") as f:
-                    return f.read()
+                with sftp.file(ovpn_path, "r") as f:
+                    return f.read().encode("utf-8")
             except FileNotFoundError:
                 return None
-            finally:
-                sftp.close()
         finally:
             client.close()
 
@@ -771,10 +636,8 @@ fi
                 clients.append({
                     "common_name": parts[0],
                     "real_address": parts[1],
-                    # Parse byte counters as integers for reliable sorting,
-                    # arithmetic, and formatting in templates.
-                    "bytes_received": int(parts[2]) if parts[2].isdigit() else 0,
-                    "bytes_sent": int(parts[3]) if parts[3].isdigit() else 0,
+                    "bytes_received": parts[2],
+                    "bytes_sent": parts[3],
                     "connected_since": parts[4],
                 })
 

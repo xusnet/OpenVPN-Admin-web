@@ -19,19 +19,22 @@ Architecture:
 Security:
     - Passwords are hashed with bcrypt (work factor from gensalt())
     - Session data is signed with Flask's SECRET_KEY
-    - CSRF tokens are validated for every state-changing request
-    - Session ID is regenerated on login to prevent fixation attacks
+    - Session timeout is configurable via SESSION_TIMEOUT env var
     - All auth operations are audit-logged
+
+Environment Variables:
+    SESSION_TIMEOUT — Session lifetime in seconds (default: 3600)
 """
 
 import functools
+import os
 import secrets
-import time
+from datetime import datetime, timezone
 
 import bcrypt
 from flask import (
     Blueprint, request, session, redirect, url_for,
-    render_template, flash, g, abort
+    render_template, flash, g
 )
 
 from database import get_db, db_session
@@ -44,43 +47,12 @@ from database import get_db, db_session
 auth_bp = Blueprint("auth", __name__)
 
 
-# ── CSRF Protection ────────────────────────────────────────────────────────
-# Lightweight session-based CSRF tokens. No extra dependencies needed.
+# ── Session Configuration ─────────────────────────────────────────────────
 
-_CSRF_TOKEN_KEY = "_csrf_token"
-
-
-def get_csrf_token() -> str:
-    """
-    Return the current session's CSRF token, creating one if absent.
-
-    The token is a 32-byte URL-safe random string stored in the signed
-    session cookie. It is rotated on login to prevent fixation.
-    """
-    token = session.get(_CSRF_TOKEN_KEY)
-    if not token:
-        token = secrets.token_urlsafe(32)
-        session[_CSRF_TOKEN_KEY] = token
-    return token
-
-
-def validate_csrf_token() -> None:
-    """
-    Validate the CSRF token for the current POST/PUT/PATCH/DELETE request.
-
-    Reads the token from the request form/body (``csrf_token`` field) and
-    compares it to the token stored in the session. On mismatch, aborts
-    with HTTP 403.
-
-    Safe methods (GET, HEAD, OPTIONS, TRACE) are not validated.
-    """
-    if request.method in ("GET", "HEAD", "OPTIONS", "TRACE"):
-        return
-
-    submitted = request.form.get("csrf_token", "")
-    expected = session.get(_CSRF_TOKEN_KEY, "")
-    if not submitted or not secrets.compare_digest(submitted, expected):
-        abort(403, description="CSRF token missing or invalid")
+# Session timeout in seconds. Flask's default session cookie is browser-session
+# only (expires on close). For persistent sessions, consider using Flask-Login
+# or Redis-backed sessions in production.
+SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "3600"))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -178,14 +150,6 @@ def _audit(action: str, detail: str = "") -> None:
                 "username=alice role=operator").
     """
     try:
-        # When deployed behind a reverse proxy (nginx, traefik, etc.),
-        # ``request.remote_addr`` is the proxy's IP, not the real client.
-        # Trust ``X-Forwarded-For`` first if it is present; fall back to
-        # the direct address otherwise. The header is taken as the first
-        # entry in the comma-separated list.
-        ip = (request.headers.get("X-Forwarded-For") or request.remote_addr or "")
-        ip = ip.split(",")[0].strip()
-
         with db_session() as db:
             db.execute(
                 "INSERT INTO audit_log (username, action, detail, ip_address) "
@@ -194,7 +158,7 @@ def _audit(action: str, detail: str = "") -> None:
                     session.get("username", "system"),
                     action,
                     detail,
-                    ip
+                    request.remote_addr or ""
                 )
             )
     except Exception:
@@ -267,15 +231,10 @@ def login_page():
     """
     # ── GET: show login form ──────────────────────────────────────────
     if request.method == "GET":
-        # Already logged in users have no business on the login page.
-        if "username" in session:
-            return redirect(url_for("dashboard"))
         return render_template("login.html")
 
     # ── POST: validate credentials ────────────────────────────────────
     username = request.form.get("username", "").strip()
-    # Passwords must NOT be stripped — leading/trailing whitespace can be
-    # a legitimate part of a user's password.
     password = request.form.get("password", "")
 
     # Basic input validation
@@ -294,34 +253,13 @@ def login_page():
     # Constant-time-ish verification via bcrypt.checkpw
     if not user or not verify_password(password, user["password"]):
         flash("用户名或密码错误", "danger")
-        _audit("login_failed", f"attempted_username={username}")
+        _audit("login_failed", f"username={username}")
         return render_template("login.html")
 
     # ── Create session ────────────────────────────────────────────────
-    # Regenerate the session identifier on login to prevent session
-    # fixation attacks. We preserve the CSRF token so the current
-    # request's token remains valid.
-    #
-    # ``session.regenerate()`` is only available in Flask 3.0+. To stay
-    # compatible with older supported versions, fall back to a manual
-    # clear-and-repopulate which produces a fresh signed session cookie.
-    old_csrf = session.get(_CSRF_TOKEN_KEY)
-    try:
-        session.regenerate()
-    except AttributeError:
-        session_data = {k: v for k, v in session.items()}
-        session.clear()
-        for k, v in session_data.items():
-            session[k] = v
-    if old_csrf:
-        session[_CSRF_TOKEN_KEY] = old_csrf
-
-    # Store ``_last_activity`` as a Unix timestamp (int) so it survives
-    # the JSON-serializable constraint of Flask's default session.
     session["username"] = user["username"]
     session["role"] = user["role"]
     session["user_id"] = user["id"]
-    session["_last_activity"] = time.time()
 
     _audit("login", f"role={user['role']}")
     return redirect(url_for("dashboard"))

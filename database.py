@@ -25,6 +25,7 @@ Environment Variables:
 
 import sqlite3
 import os
+from datetime import datetime, timezone
 from contextlib import contextmanager
 
 
@@ -118,13 +119,8 @@ def init_db() -> None:
         The default admin password is read from ADMIN_PASSWORD env var
         (default: "admin123"). CHANGE THIS IMMEDIATELY after first login.
     """
-    # Ensure the parent directory exists (critical for first-run in Docker).
-    # Guard against empty dirname when DB_PATH is a relative filename like
-    # "admin.db" — os.makedirs('') raises FileNotFoundError on some Python
-    # versions.
-    db_dir = os.path.dirname(DB_PATH)
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
+    # Ensure the parent directory exists (critical for first-run in Docker)
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
     with db_session() as db:
         # ── Create all tables in a single script for atomicity ─────────
